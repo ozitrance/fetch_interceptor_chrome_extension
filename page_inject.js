@@ -72,66 +72,99 @@
         };
     }
 
-    function override_fetch(window) {
-        const _fetch = window.fetch;
+function override_fetch(window) {
+    const _fetch = window.fetch;
 
-        window.fetch = async function () {
-            let request, url;
+    window.fetch = async function (input, init) {
+        let request = null;
+        let url = null;
 
-            if (arguments[0] instanceof Request) {
-                request = arguments[0];
-                url = request.url;
-            } else {
-                request = arguments[1];
-                url = arguments[0];
-            }
+        // Normalize input + URL
+        if (input instanceof Request) {
+            request = input;
+            url = input.url; // this is already a string
+        } else {
+            url = input;
+        }
 
-            let request_text = "";
+        // Ensure URL is a string (avoid passing URL objects to postMessage)
+        if (url instanceof URL) {
+            url = url.toString();
+        } else if (typeof url !== "string") {
+            url = String(url);
+        }
+
+        // Try to get request body as text for logging
+        let request_text = "";
+        try {
             if (request instanceof Request) {
-                try {
-                    const request_clone = request.clone();
-                    request_text = await request_clone.text();
-                } catch (e) {
-                    request_text = "";
-                }
-            }
-
-            const response = await _fetch.apply(window, arguments);
-            const response_clone = response.clone();
-            const response_text = await response_clone.text();
-
-            const message = {
-                name: "fetch_response_captured",
-                data: {
-                    status: response_clone.status,
-                    response_text,
-                    response_url: url,
-                    request_url: url,
-                    request_text,
-                    response_headers: {},
-                    response_body: {}
-                }
-            };
-
-            if (arguments[1] && arguments[1].headers) {
-                if (arguments[1].headers instanceof Headers) {
-                    message.data.response_headers = {};
-                    for (const pair of arguments[1].headers.entries()) {
-                        message.data.response_headers[pair[0]] = pair[1];
+                const request_clone = request.clone();
+                request_text = await request_clone.text();
+            } else if (init && init.body != null) {
+                const body = init.body;
+                if (typeof body === "string") {
+                    request_text = body;
+                } else if (body instanceof URLSearchParams) {
+                    request_text = body.toString();
+                } else if (body instanceof FormData) {
+                    const formEntries = [];
+                    for (const [key, value] of body.entries()) {
+                        formEntries.push([key, value instanceof File ? value.name : String(value)]);
                     }
+                request_text = JSON.stringify(formEntries);
                 } else {
-                    message.data.response_headers = arguments[1].headers;
+                    // fallback – try JSON stringify, but don't crash if it fails
+                    try {
+                        request_text = JSON.stringify(body);
+                    } catch {
+                        request_text = "";
+                    }
                 }
             }
+        } catch (e) {
+            request_text = "";
+        }
 
-            if (arguments[1] && arguments[1].body) {
-                message.data.response_body = arguments[1].body;
+        // Perform the real fetch
+        const response = await _fetch.call(window, input, init);
+        const response_clone = response.clone();
+
+        let response_text = "";
+        try {
+            response_text = await response_clone.text();
+        } catch (e) {
+            response_text = "";
+        }
+
+        // Normalize headers to a plain object
+        const response_headers = {};
+        try {
+            response_clone.headers.forEach((value, key) => {
+                response_headers[key] = value;
+            });
+        } catch (e) {
+        // ignore header errors, keep empty object
+        }
+
+        const message = {
+            name: "fetch_response_captured",
+            data: {
+                status: response_clone.status,
+                response_text,
+                response_url: response_clone.url || url,
+                request_url: url,
+                request_text,
+                response_headers
+                // no raw body or non-cloneable objects here
             }
-
-            sendLog("fetch", message);
-            return response;
         };
-    }
+
+        // This should now be fully structured-cloneable
+        sendLog("fetch", message);
+
+        return response;
+    };
+}
 
     override_fetch(window);
     override_xhr(window);
